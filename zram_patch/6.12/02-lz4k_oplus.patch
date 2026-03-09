@@ -1,0 +1,214 @@
+diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
+index f1a87785340e..5b65028043ef 100644
+--- a/drivers/block/zram/Kconfig
++++ b/drivers/block/zram/Kconfig
+@@ -38,6 +38,12 @@ config ZRAM_BACKEND_LZ4KD
+ 	select LZ4_COMPRESS
+ 	select LZ4_DECOMPRESS
+ 
++config ZRAM_BACKEND_LZ4K_OPLUS
++	bool "lz4k_oplus compression support"
++	depends on ZRAM
++	default y
++	select LZ4_COMPRESS
++	select LZ4_DECOMPRESS
+ 
+ config ZRAM_BACKEND_ZSTD
+ 	bool "zstd compression support"
+@@ -57,7 +63,8 @@ config ZRAM_BACKEND_FORCE_LZO
+ 	depends on ZRAM
+ 	def_bool !ZRAM_BACKEND_LZ4 && !ZRAM_BACKEND_LZ4HC && \
+ 		 !ZRAM_BACKEND_LZ4K && !ZRAM_BACKEND_LZ4KD && \
+-		 !ZRAM_BACKEND_ZSTD && !ZRAM_BACKEND_DEFLATE && \
++		 !ZRAM_BACKEND_LZ4K_OPLUS && !ZRAM_BACKEND_ZSTD && \
++		 !ZRAM_BACKEND_DEFLATE && \
+ 		 !ZRAM_BACKEND_842
+ 
+ config ZRAM_BACKEND_LZO
+@@ -89,6 +96,10 @@ config ZRAM_DEF_COMP_LZ4KD
+ 	bool "lz4kd"
+ 	depends on ZRAM_BACKEND_LZ4KD
+ 
++config ZRAM_DEF_COMP_LZ4K_OPLUS
++	bool "lz4k_oplus"
++	depends on ZRAM_BACKEND_LZ4K_OPLUS
++
+ config ZRAM_DEF_COMP_ZSTD
+ 	bool "zstd"
+ 	depends on ZRAM_BACKEND_ZSTD
+@@ -109,6 +120,7 @@ config ZRAM_DEF_COMP
+ 	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
+ 	default "lz4k" if ZRAM_DEF_COMP_LZ4K
+ 	default "lz4kd" if ZRAM_DEF_COMP_LZ4KD
++	default "lz4k_oplus" if ZRAM_DEF_COMP_LZ4K_OPLUS
+ 	default "zstd" if ZRAM_DEF_COMP_ZSTD
+ 	default "deflate" if ZRAM_DEF_COMP_DEFLATE
+ 	default "842" if ZRAM_DEF_COMP_842
+diff --git a/drivers/block/zram/Makefile b/drivers/block/zram/Makefile
+index 34f4a0dad997..87ca1270eb5f 100644
+--- a/drivers/block/zram/Makefile
++++ b/drivers/block/zram/Makefile
+@@ -5,6 +5,7 @@ zram-$(CONFIG_ZRAM_BACKEND_LZ4) += backend_lz4.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4HC) += backend_lz4hc.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4K) += backend_lz4k.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4KD) += backend_lz4kd.o
++zram-$(CONFIG_ZRAM_BACKEND_LZ4K_OPLUS) += backend_lz4k_oplus.o
+ zram-$(CONFIG_ZRAM_BACKEND_ZSTD) += backend_zstd.o
+ zram-$(CONFIG_ZRAM_BACKEND_DEFLATE) += backend_deflate.o
+ zram-$(CONFIG_ZRAM_BACKEND_842) += backend_842.o
+diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
+index c8f0d92e7f5b..8ea180249f2c 100644
+--- a/drivers/block/zram/zcomp.c
++++ b/drivers/block/zram/zcomp.c
+@@ -21,6 +21,7 @@
+ #include "backend_lz4hc.h"
+ #include "backend_lz4k.h"
+ #include "backend_lz4kd.h"
++#include "backend_lz4k_oplus.h"
+ #include "backend_zstd.h"
+ #include "backend_deflate.h"
+ #include "backend_842.h"
+@@ -41,6 +42,9 @@ static const struct zcomp_ops *backends[] = {
+ #if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4KD)
+ 	&backend_lz4kd,
+ #endif
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4K_OPLUS)
++	&backend_lz4k_oplus,
++#endif
+ #if IS_ENABLED(CONFIG_ZRAM_BACKEND_ZSTD)
+ 	&backend_zstd,
+ #endif
+diff --git a/drivers/block/zram/backend_lz4k_oplus.c b/drivers/block/zram/backend_lz4k_oplus.c
+new file mode 100644
+index 000000000000..fdd94ed30b47
+--- /dev/null
++++ b/drivers/block/zram/backend_lz4k_oplus.c
+@@ -0,0 +1,108 @@
++#include <linux/kernel.h>
++#include <linux/lz4.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++#include "backend_lz4k_oplus.h"
++
++struct lz4k_oplus_ctx {
++	void *mem;
++	LZ4_streamDecode_t *dstrm;
++	LZ4_stream_t *cstrm;
++};
++
++static void lz4k_oplus_release_params(struct zcomp_params *params)
++{
++}
++
++static int lz4k_oplus_setup_params(struct zcomp_params *params)
++{
++	if (params->level == ZCOMP_PARAM_NO_LEVEL)
++		params->level = LZ4_ACCELERATION_DEFAULT;
++	return 0;
++}
++
++static void lz4k_oplus_destroy(struct zcomp_ctx *ctx)
++{
++	struct lz4k_oplus_ctx *zctx = ctx->context;
++
++	if (!zctx)
++		return;
++
++	vfree(zctx->mem);
++	kfree(zctx->dstrm);
++	kfree(zctx->cstrm);
++	kfree(zctx);
++}
++
++static int lz4k_oplus_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
++{
++	struct lz4k_oplus_ctx *zctx;
++
++	zctx = kzalloc(sizeof(*zctx), GFP_KERNEL);
++	if (!zctx)
++		return -ENOMEM;
++
++	ctx->context = zctx;
++	if (params->dict_sz == 0) {
++		zctx->mem = vmalloc(LZ4_MEM_COMPRESS);
++		if (!zctx->mem)
++			goto error;
++	} else {
++		zctx->dstrm = kzalloc(sizeof(*zctx->dstrm), GFP_KERNEL);
++		if (!zctx->dstrm)
++			goto error;
++		zctx->cstrm = kzalloc(sizeof(*zctx->cstrm), GFP_KERNEL);
++		if (!zctx->cstrm)
++			goto error;
++	}
++
++	return 0;
++error:
++	lz4k_oplus_destroy(ctx);
++	return -ENOMEM;
++}
++
++static int lz4k_oplus_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			       struct zcomp_req *req)
++{
++	struct lz4k_oplus_ctx *zctx = ctx->context;
++	int ret;
++
++	if (!zctx->cstrm) {
++		ret = LZ4_compress_fast(req->src, req->dst, req->src_len,
++					req->dst_len, params->level, zctx->mem);
++	} else {
++		ret = LZ4_loadDict(zctx->cstrm, params->dict, params->dict_sz);
++		if (ret != params->dict_sz)
++			return -EINVAL;
++		ret = LZ4_compress_fast_continue(zctx->cstrm, req->src, req->dst,
++						 req->src_len, req->dst_len,
++						 params->level);
++	}
++	if (!ret)
++		return -EINVAL;
++	req->dst_len = ret;
++	return 0;
++}
++
++static int lz4k_oplus_decompress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++				 struct zcomp_req *req)
++{
++	struct lz4k_oplus_ctx *zctx = ctx->context;
++	int ret;
++
++	if (!zctx->dstrm) {
++		ret = LZ4_decompress_safe(req->src, req->dst, req->src_len, req->dst_len);
++	} else {
++		ret = LZ4_setStreamDecode(zctx->dstrm, params->dict, params->dict_sz);
++		if (!ret)
++			return -EINVAL;
++		ret = LZ4_decompress_safe_continue(zctx->dstrm, req->src, req->dst,
++						   req->src_len, req->dst_len);
++	}
++	return ret < 0 ? -EINVAL : 0;
++}
++
++const struct zcomp_ops backend_lz4k_oplus = {
++	.compress = lz4k_oplus_compress,
++	.decompress = lz4k_oplus_decompress,
++	.create_ctx = lz4k_oplus_create,
++	.destroy_ctx = lz4k_oplus_destroy,
++	.setup_params = lz4k_oplus_setup_params,
++	.release_params = lz4k_oplus_release_params,
++	.name = "lz4k_oplus",
++};
+diff --git a/drivers/block/zram/backend_lz4k_oplus.h b/drivers/block/zram/backend_lz4k_oplus.h
+new file mode 100644
+index 000000000000..aeb13cab6382
+--- /dev/null
++++ b/drivers/block/zram/backend_lz4k_oplus.h
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#ifndef __BACKEND_LZ4K_OPLUS_H__
++#define __BACKEND_LZ4K_OPLUS_H__
++
++#include "zcomp.h"
++extern const struct zcomp_ops backend_lz4k_oplus;
++
++#endif /* __BACKEND_LZ4K_OPLUS_H__ */
