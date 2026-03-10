@@ -622,6 +622,20 @@ jobs:
           echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+
+          # clang-r536225 + 6.12 + sanitizer 组合在链接 vmlinux.o 时会触发 LLVM 内部错误。
+          # 对 android16-6.12 关闭 KASAN/UBSAN，避免 __asan_handle_no_return 相关崩溃。
+          if [ "${{ inputs.android_version }}" = "android16" ] && [ "${{ inputs.kernel_version }}" = "6.12" ]; then
+            echo "Disable KASAN/UBSAN for android16-6.12 to avoid lld crash"
+            {
+              echo "# CONFIG_KASAN is not set"
+              echo "# CONFIG_KASAN_HW_TAGS is not set"
+              echo "# CONFIG_KASAN_SW_TAGS is not set"
+              echo "# CONFIG_KASAN_GENERIC is not set"
+              echo "# CONFIG_UBSAN is not set"
+              echo "# CONFIG_UBSAN_TRAP is not set"
+            } >> ./common/arch/arm64/configs/gki_defconfig
+          fi
           
           # Remove check_defconfig
           sed -i 's/check_defconfig//' ./common/build.config.gki
