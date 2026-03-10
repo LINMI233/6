@@ -469,6 +469,29 @@ jobs:
         run: |
           echo "更改为配置目录: $CONFIG..."
           cd "$CONFIG/common"
+          FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}"
+
+          # 69_hide_stuff.patch 原版与 android16-6.12 不兼容。
+          # 对 6.12 使用仓库内适配版补丁。
+          if [ "$FORMATTED_BRANCH" = "android16-6.12" ]; then
+            LOCAL_HIDE_PATCH="../../hide_patch/6.12/69_hide_stuff.patch"
+            if [ -f "$LOCAL_HIDE_PATCH" ]; then
+              echo "Applying android16-6.12 adapted hide patch: $LOCAL_HIDE_PATCH"
+              if patch -p1 --forward --dry-run < "$LOCAL_HIDE_PATCH"; then
+                patch -p1 --forward < "$LOCAL_HIDE_PATCH"
+                echo "Applied android16-6.12 adapted hide patch successfully."
+              else
+                echo "::warning::6.12 adapted hide patch dry-run failed, fallback to base.c-only tweak."
+                if grep -qF '*path = *file_user_path(vma->vm_file);' ./fs/proc/base.c && ! grep -qF 'framework-res.apk' ./fs/proc/base.c; then
+                  perl -0777 -i -pe 's@vma = find_exact_vma\(mm, vm_start, vm_end\);\n\tif \(vma && vma->vm_file\) \{\n\t\t\*path = \*file_user_path\(vma->vm_file\);\n\t\tpath_get\(path\);\n\t\trc = 0;\n\t\}@vma = find_exact_vma(mm, vm_start, vm_end);\n\tif (vma) {\n\t\tif (vma->vm_file) {\n\t\t\tif (strstr(vma->vm_file->f_path.dentry->d_name.name, "lineage")) {\n\t\t\t\trc = kern_path("/system/framework/framework-res.apk", LOOKUP_FOLLOW, path);\n\t\t\t} else {\n\t\t\t\t*path = *file_user_path(vma->vm_file);\n\t\t\t\tpath_get(path);\n\t\t\t\trc = 0;\n\t\t\t}\n\t\t}\n\t}@s' ./fs/proc/base.c || true
+                fi
+              fi
+            else
+              echo "::warning::Missing local 6.12 hide patch: $LOCAL_HIDE_PATCH"
+            fi
+            exit 0
+          fi
+
           # Apply additional patch
           HIDE_PATCH_RESULT=0
           if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
@@ -480,17 +503,7 @@ jobs:
           fi
 
           if [ "$HIDE_PATCH_RESULT" -ne 0 ]; then
-            echo "::warning::69_hide_stuff.patch failed with exit code ${HIDE_PATCH_RESULT}, trying compatibility fallback."
-            FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}"
-            if [ "$FORMATTED_BRANCH" = "android16-6.12" ]; then
-              # AOSP 6.12 uses file_user_path() in map_files_get_link; adjust only when pattern exists.
-              if grep -qF '*path = *file_user_path(vma->vm_file);' ./fs/proc/base.c && ! grep -qF 'framework-res.apk' ./fs/proc/base.c; then
-                perl -0777 -i -pe 's@vma = find_exact_vma\(mm, vm_start, vm_end\);\n\tif \(vma && vma->vm_file\) \{\n\t\t\*path = \*file_user_path\(vma->vm_file\);\n\t\tpath_get\(path\);\n\t\trc = 0;\n\t\}@vma = find_exact_vma(mm, vm_start, vm_end);\n\tif (vma) {\n\t\tif (vma->vm_file) {\n\t\t\tif (strstr(vma->vm_file->f_path.dentry->d_name.name, "lineage")) {\n\t\t\t\trc = kern_path("/system/framework/framework-res.apk", LOOKUP_FOLLOW, path);\n\t\t\t} else {\n\t\t\t\t*path = *file_user_path(vma->vm_file);\n\t\t\t\tpath_get(path);\n\t\t\t\trc = 0;\n\t\t\t}\n\t\t}\n\t}@s' ./fs/proc/base.c || true
-              fi
-              echo "::warning::hide_stuff fallback applied for android16-6.12; build continues."
-            else
-              echo "::warning::No fallback defined for $FORMATTED_BRANCH; build continues without full hide patch."
-            fi
+            echo "::warning::69_hide_stuff.patch failed with exit code ${HIDE_PATCH_RESULT}; build continues without this patch."
           fi
 
       - name: LZ4KD & Lz4k_oplus配置
