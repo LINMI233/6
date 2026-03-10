@@ -651,6 +651,26 @@ jobs:
             fi
           fi
 
+      - name: 规范化 gki_defconfig（修复 savedefconfig 校验）
+        run: |
+          echo "更改为配置目录: $CONFIG..."
+          cd "$CONFIG"
+          DEFCONFIG_PATH="./common/arch/arm64/configs/gki_defconfig"
+          OUT_DIR="./out_defconfig"
+
+          echo "Normalizing $DEFCONFIG_PATH with savedefconfig..."
+          rm -rf "$OUT_DIR"
+          make -C ./common O=../out_defconfig ARCH=arm64 gki_defconfig savedefconfig
+
+          if [ ! -f "$OUT_DIR/defconfig" ]; then
+            echo "::error::savedefconfig 未生成 defconfig，无法继续。"
+            exit 1
+          fi
+
+          cp "$OUT_DIR/defconfig" "$DEFCONFIG_PATH"
+          echo "defconfig normalization done."
+          rm -rf "$OUT_DIR"
+
       - name: Build with retry
         uses: nick-fields/retry@v3
         with:
