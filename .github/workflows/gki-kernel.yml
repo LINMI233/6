@@ -426,64 +426,71 @@ jobs:
           cp -r ../../SukiSU_patch/other/zram/lz4k/crypto/* ./crypto/
           cp -r ../../SukiSU_patch/other/zram/lz4k_oplus ./lib/
 
-          ZRAM_PATCH_DIR="../../SukiSU_patch/other/zram/zram_patch/${{ inputs.kernel_version }}"
-          if [ ! -f "$ZRAM_PATCH_DIR/lz4kd.patch" ] || [ ! -f "$ZRAM_PATCH_DIR/lz4k_oplus.patch" ]; then
-            echo "::warning::未找到内核 ${{ inputs.kernel_version }} 的zram补丁，跳过LZ4KD/LZ4K_OPLUS补丁应用。"
-            LOCAL_PATCH_DIR="../../zram_patch/${{ inputs.kernel_version }}"
-            if [ -d "$LOCAL_PATCH_DIR" ] && ls "$LOCAL_PATCH_DIR"/*.patch > /dev/null 2>&1; then
-              echo "Fallback to local zram patch dir: $LOCAL_PATCH_DIR"
-              for patch in "$LOCAL_PATCH_DIR"/*.patch; do
-                [ -f "$patch" ] || continue
-                echo "Applying local patch: $(basename "$patch")"
-                patch -p1 --forward < "$patch"
-              done
-              echo "ZRAM_CUSTOM_PATCHED=true" >> $GITHUB_ENV
-              if [ "${{ inputs.kernel_version }}" = "6.12" ]; then
-                {
-                  echo "CONFIG_ZRAM_BACKEND_LZ4K=y"
-                  echo "CONFIG_ZRAM_BACKEND_LZ4KD=y"
-                  echo "CONFIG_ZRAM_BACKEND_LZ4K_OPLUS=y"
-                  echo "CONFIG_ZRAM_DEF_COMP_LZ4KD=y"
-                  echo "# CONFIG_ZRAM_BACKEND_FORCE_LZO is not set"
-                } >> arch/arm64/configs/gki_defconfig
-              fi
-            else
-              echo "ZRAM_CUSTOM_PATCHED=false" >> $GITHUB_ENV
-            fi
-            exit 0
+          LOCAL_PATCH_DIR="../../zram_patch/${{ inputs.kernel_version }}"
+          REMOTE_PATCH_DIR="../../SukiSU_patch/other/zram/zram_patch/${{ inputs.kernel_version }}"
+          ZRAM_PATCHED=false
+
+          if [ -d "$LOCAL_PATCH_DIR" ] && ls "$LOCAL_PATCH_DIR"/*.patch > /dev/null 2>&1; then
+            echo "Using local zram patch dir: $LOCAL_PATCH_DIR"
+            for patch in "$LOCAL_PATCH_DIR"/*.patch; do
+              [ -f "$patch" ] || continue
+              echo "Applying local patch: $(basename "$patch")"
+              patch -p1 --forward < "$patch"
+            done
+            ZRAM_PATCHED=true
+          elif [ -f "$REMOTE_PATCH_DIR/lz4kd.patch" ] && [ -f "$REMOTE_PATCH_DIR/lz4k_oplus.patch" ]; then
+            echo "Using upstream zram patch dir: $REMOTE_PATCH_DIR"
+            cp "$REMOTE_PATCH_DIR/lz4kd.patch" ./
+            echo "正在打lz4kd补丁"
+            patch -p1 -F 3 < lz4kd.patch || true
+            echo '完成LZ4KD补丁'
+
+            cp "$REMOTE_PATCH_DIR/lz4k_oplus.patch" ./
+            echo "正在打lz4k_oplus补丁"
+            patch -p1 -F 3 < lz4k_oplus.patch || true
+            echo '完成lz4k_oplus补丁'
+            ZRAM_PATCHED=true
+          else
+            echo "::warning::未找到可用的内核 ${{ inputs.kernel_version }} zram补丁（本地+远端均不存在），本次跳过LZ4KD/LZ4K_OPLUS。"
           fi
 
-          cp "$ZRAM_PATCH_DIR/lz4kd.patch" ./
-          echo "正在打lz4kd补丁"
-          patch -p1 -F 3 < lz4kd.patch || true
-          echo '完成LZ4KD补丁'
-
-          cp "$ZRAM_PATCH_DIR/lz4k_oplus.patch" ./
-          echo "正在打lz4k_oplus补丁"
-          patch -p1 -F 3 < lz4k_oplus.patch || true
-          echo '完成lz4k_oplus补丁'
-            echo "ZRAM_CUSTOM_PATCHED=true" >> $GITHUB_ENV
-            if [ "${{ inputs.kernel_version }}" = "6.12" ]; then
-              {
-                echo "CONFIG_ZRAM_BACKEND_LZ4K=y"
-                echo "CONFIG_ZRAM_BACKEND_LZ4KD=y"
-                echo "CONFIG_ZRAM_BACKEND_LZ4K_OPLUS=y"
-                echo "CONFIG_ZRAM_DEF_COMP_LZ4KD=y"
-                echo "# CONFIG_ZRAM_BACKEND_FORCE_LZO is not set"
-              } >> arch/arm64/configs/gki_defconfig
-            fi
+          echo "ZRAM_CUSTOM_PATCHED=${ZRAM_PATCHED}" >> $GITHUB_ENV
+          if [ "${ZRAM_PATCHED}" = "true" ] && [ "${{ inputs.kernel_version }}" = "6.12" ]; then
+            {
+              echo "CONFIG_ZRAM_BACKEND_LZ4K=y"
+              echo "CONFIG_ZRAM_BACKEND_LZ4KD=y"
+              echo "CONFIG_ZRAM_BACKEND_LZ4K_OPLUS=y"
+              echo "CONFIG_ZRAM_DEF_COMP_LZ4KD=y"
+              echo "# CONFIG_ZRAM_BACKEND_FORCE_LZO is not set"
+            } >> arch/arm64/configs/gki_defconfig
+          fi
 
       - name: 应用隐藏某特征的补丁
         run: |
           echo "更改为配置目录: $CONFIG..."
           cd "$CONFIG/common"
           # Apply additional patch
+          HIDE_PATCH_RESULT=0
           if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ]; then
-          cp ../../SukiSU_patch/69_hide_stuff.patch ./
-          patch -p1 -F 3 < 69_hide_stuff.patch
+            cp ../../SukiSU_patch/69_hide_stuff.patch ./
+            patch -p1 -F 3 < 69_hide_stuff.patch || HIDE_PATCH_RESULT=$?
           else
             cp ../../kernel_patches/69_hide_stuff.patch ./
-            patch -p1 -F 3 < 69_hide_stuff.patch
+            patch -p1 -F 3 < 69_hide_stuff.patch || HIDE_PATCH_RESULT=$?
+          fi
+
+          if [ "$HIDE_PATCH_RESULT" -ne 0 ]; then
+            echo "::warning::69_hide_stuff.patch failed with exit code ${HIDE_PATCH_RESULT}, trying compatibility fallback."
+            FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}"
+            if [ "$FORMATTED_BRANCH" = "android16-6.12" ]; then
+              # AOSP 6.12 uses file_user_path() in map_files_get_link; adjust only when pattern exists.
+              if grep -qF '*path = *file_user_path(vma->vm_file);' ./fs/proc/base.c && ! grep -qF 'framework-res.apk' ./fs/proc/base.c; then
+                perl -0777 -i -pe 's@vma = find_exact_vma\(mm, vm_start, vm_end\);\n\tif \(vma && vma->vm_file\) \{\n\t\t\*path = \*file_user_path\(vma->vm_file\);\n\t\tpath_get\(path\);\n\t\trc = 0;\n\t\}@vma = find_exact_vma(mm, vm_start, vm_end);\n\tif (vma) {\n\t\tif (vma->vm_file) {\n\t\t\tif (strstr(vma->vm_file->f_path.dentry->d_name.name, "lineage")) {\n\t\t\t\trc = kern_path("/system/framework/framework-res.apk", LOOKUP_FOLLOW, path);\n\t\t\t} else {\n\t\t\t\t*path = *file_user_path(vma->vm_file);\n\t\t\t\tpath_get(path);\n\t\t\t\trc = 0;\n\t\t\t}\n\t\t}\n\t}@s' ./fs/proc/base.c || true
+              fi
+              echo "::warning::hide_stuff fallback applied for android16-6.12; build continues."
+            else
+              echo "::warning::No fallback defined for $FORMATTED_BRANCH; build continues without full hide patch."
+            fi
           fi
 
       - name: LZ4KD & Lz4k_oplus配置
