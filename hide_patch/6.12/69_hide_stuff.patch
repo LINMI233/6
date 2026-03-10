@@ -1,0 +1,112 @@
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 8212dda18..e1df25973 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -2289,10 +2289,16 @@ static int map_files_get_link(struct dentry *dentry, struct path *path)
+ 
+ 	rc = -ENOENT;
+ 	vma = find_exact_vma(mm, vm_start, vm_end);
+-	if (vma && vma->vm_file) {
+-		*path = *file_user_path(vma->vm_file);
+-		path_get(path);
+-		rc = 0;
++	if (vma) {
++		if (vma->vm_file) {
++			if (strstr(vma->vm_file->f_path.dentry->d_name.name, "lineage")) {
++				rc = kern_path("/system/framework/framework-res.apk", LOOKUP_FOLLOW, path);
++			} else {
++				*path = *file_user_path(vma->vm_file);
++				path_get(path);
++				rc = 0;
++			}
++		}
+ 	}
+ 	mmap_read_unlock(mm);
+ 
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 4ec9457de..dce131c2c 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -9,6 +9,7 @@
+ #include <linux/highmem.h>
+ #include <linux/ptrace.h>
+ #include <linux/slab.h>
++#include <linux/string.h>
+ #include <linux/pagemap.h>
+ #include <linux/page_size_compat.h>
+ #include <linux/pgsize_migration.h>
+@@ -454,11 +455,33 @@ static void show_vma_header_prefix(struct seq_file *m,
+ 	seq_putc(m, ' ');
+ }
+ 
++static void show_vma_header_prefix_fake(struct seq_file *m,
++					unsigned long start, unsigned long end,
++					vm_flags_t flags, unsigned long long pgoff,
++					dev_t dev, unsigned long ino)
++{
++	seq_setwidth(m, 25 + sizeof(void *) * 6 - 1);
++	seq_put_hex_ll(m, NULL, start, 8);
++	seq_put_hex_ll(m, "-", end, 8);
++	seq_putc(m, ' ');
++	seq_putc(m, flags & VM_READ ? 'r' : '-');
++	seq_putc(m, flags & VM_WRITE ? 'w' : '-');
++	seq_putc(m, '-');
++	seq_putc(m, flags & VM_MAYSHARE ? 's' : 'p');
++	seq_put_hex_ll(m, " ", pgoff, 8);
++	seq_put_hex_ll(m, " ", MAJOR(dev), 2);
++	seq_put_hex_ll(m, ":", MINOR(dev), 2);
++	seq_put_decimal_ull(m, " ", ino);
++	seq_putc(m, ' ');
++}
++
+ static void
+ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
+ {
+ 	const struct path *path;
+ 	const char *name_fmt, *name;
++	bool fake_jit_zygote_cache = false;
++	bool fake_lineage = false;
+ 	vm_flags_t flags = vma->vm_flags;
+ 	unsigned long ino = 0;
+ 	unsigned long long pgoff = 0;
+@@ -467,10 +490,20 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
+ 
+ 	if (vma->vm_file) {
+ 		const struct inode *inode = file_user_inode(vma->vm_file);
++		const char *dname = NULL;
+ 
+ 		dev = inode->i_sb->s_dev;
+ 		ino = inode->i_ino;
+ 		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
++
++		if (vma->vm_file->f_path.dentry)
++			dname = vma->vm_file->f_path.dentry->d_name.name;
++		if (dname) {
++			if (strstr(dname, "lineage"))
++				fake_lineage = true;
++			else if (strstr(dname, "jit-zygote-cache"))
++				fake_jit_zygote_cache = true;
++		}
+ 	}
+ 
+ 	start = vma->vm_start;
+@@ -497,9 +530,18 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
+ 
+ 	__fold_filemap_fixup_entry(&((struct proc_maps_private *)m->private)->iter, &end);
+ 
+-	show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
++	if (fake_jit_zygote_cache)
++		show_vma_header_prefix_fake(m, start, end, flags, pgoff, dev, ino);
++	else
++		show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
+ 
+ 	get_vma_name(vma, &path, &name, &name_fmt);
++	if (fake_lineage) {
++		path = NULL;
++		name_fmt = NULL;
++		name = "/system/framework/framework-res.apk";
++	}
++
+ 	if (path) {
+ 		seq_pad(m, ' ');
+ 		seq_path(m, path, "\n");
